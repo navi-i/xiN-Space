@@ -1,0 +1,175 @@
+This a personal install guide for NixOS with ZFS / ZFS Native Encryption / Erase Your Darlings.
+
+Hello! Welcome to a guide on how to install NixOS!
+This guide was made because I could quite find any good guides on installing NixOS with the following feautures:
+  - Disk Encryption
+  - ZFS
+  - Erase Your Darlings
+This guide will help you in accomplishing all three on your main drive. Other drives you may have to do and figure out yourself as I do not have any desire to have these features on other drives.
+
+This guide takes steps from both https://github.com/mcdonc/p51-thinkpad-nixos/tree/zfsvid and https://grahamc.com/blog/erase-your-darlings/ and https://gist.github.com/Quelklef/e5d0d9ea0c2777db45f0779b9996c94b (Thanks to both)
+
+Prerequisites
+  - A PC
+  - Another tab / phone open to follow
+That's it! Now, the guide
+
+
+-  Download minimal NixOS image from the official NixOS website - https://nixos.org/download.html
+-  Boot into ISO on your USB drive and or VM
+-  Once booted, sudo su just to make the process a little easier
+
+We will start with partitioning using fdisk. I will only layout the commands to be typed. Minus the (-)
+
+- fdisk /dev/vda  (replace vda with your drive, look for drive with lsblk command)
+-  g
+-  n
+-  enter
+-  enter
+-  +2G
+ !!! Only if making swap.
+-  n
+-  enter
+-  enter
+-  +8G (Swap Size)
+ !!! End of swap.
+-  t
+-  1
+-  1
+-  n
+-  enter
+-  enter
+-  enter
+-  w
+
+
+Create boot volume
+-  mkswap -L swap /dev/vda2 (If making swap)
+-  mkfs.fat -F 32 /dev/vda1  (replace vda with disk of choice)
+-  mkfs.fat -F32 -n boot /dev/vda3  (should be /dev/disk2 if no swap was made)
+
+Create the zpool (long command)
+
+-  zpool create -f \
+  -o altroot="/mnt" \ 
+  -o ashift=12 \ 
+  -o autotrim=on \
+  -O compression=lz4 \
+  -O acltype=posixacl \
+  -O xattr=sa \
+  -O relatime=on \
+  -O normalization=formD \
+  -O dnodesize=auto \
+  -O sync=disabled \
+  -O encryption=aes-256-gcm \
+  -O keylocation=prompt \
+  -O keyformat=passphrase \
+  -O mountpoint=none \
+  rpool
+  /dev/vda3  (replace vda3 with disk of choice)
+
+Next part will setup eyd
+
+- zfs create -p -o mountpoint=legacy rpool/local/root
+
+- zfs snapshot rpool/local/root@blank
+
+- mount -t zfs rpool/local/root /mnt
+
+- mkdir /mnt/boot
+- mount /dev/the-boot-partition /mnt/boot
+
+- zfs create -p -o mountpoint=legacy rpool/local/nix
+- mkdir /mnt/nix
+- mount -t zfs rpool/local/nix /mnt/nix
+
+- zfs create -p -o mountpoint=legacy rpool/safe/home
+- mkdir /mnt/home
+- mount -t zfs rpool/safe/home /mnt/home
+
+- zfs create -p -o mountpoint=legacy rpool/safe/persist
+- mkdir /mnt/persist
+- mount -t zfs rpool/safe/persist /mnt/persist
+
+- nixos-generate-config --root /mnt
+
+# Start Editing
+ - vim /mnt/etc/nixos/configuration.nix
+
+Things to add and change are as follows...
+
+-----
+
+  boot.loader.grub.enable = true;
+  boot.loader.grub.devices = [ "nodev" ];
+  boot.loader.grub.efiInstallAsRemovable = true;
+  boot.loader.grub.efiSupport = true;
+  boot.loader.grub.useOSProber = true;
+  boot.supportedFilesystems = [ "zfs" ];
+  boot.zfs.requestEncryptionCredentials = true;
+  boot.zfs.devNodes = "/dev/disk/by-partuuid" (VERY IMPORTANT STEP. DOES NOT WORK IF NOT SET!!!! for me. mileage may vary)
+  services.zfs.autoScrub.enable = true;
+
+  # AMD Configuration
+  boot.initrd.kernelModules = [ "amdgpu" ];
+  services.xserver.videoDrivers = [ "amdgpu" ];
+  !!! Add only if this NixOS installation is a vm and you wish to passthrough a gpu into it !!!
+  hardware.enableRedistributableFirmware = true;
+
+  networking.hostName = "nixxy"; # Define your hostname.
+  # Pick only one of the below networking options.
+  # networking.wireless.enable = true;  # Enables wireless support via wpa_supplicant.
+  networking.networkmanager.enable = true;  # Easiest to use and most distros use this by default.
+  networking.hostId = "d13e0d41";
+
+  users.users.vi = {
+    isNormalUser = true;
+    initialPassword = "password123";
+    extraGroups = [ "wheel" ];
+  };
+
+# System Packages
+environment.systemPackages = with pkgs; [ vim wget git ];
+
+# Enables EYD (reverts to blank snapshot made before)
+ boot.initrd.postDeviceCommands = lib.mkAfter ''
+    zfs rollback -r rpool/local/root@blank
+  '';
+
+-----
+
+No need to change hardware-configuration.nix
+
+- nixos-install --verbose --no-root-password
+- reboot
+
+Log back in and return to root
+- sudo su
+
+Next, move NixOS into persistant storage and enabling EYD.
+
+- mkdir -p /persist/etc
+- mv /etc/nixos /persist/etc
+- vim /per/etc/nixos/configuration.nix
+
+(If you reboot and no configuration.nix file is active, run "nixos-generate-config".)
+
+Activate the new config
+- nixos-rebuild -I nixos-config=/persist/etc/nixos/configuration.nix switch
+
+Test by making two files.
+- touch /persist/test
+- touch /etc/test
+
+Once you reboot, /per/test should stay active, /etc/test should be deleted.
+
+
+Done! As said before, this takes steps from multiple other sources in order to combine both EYD and disk encyrption as I could not find an already made guide with these features.
+
+!!! Only continue if you wish to add gnome !!!
+
+- sudo vim /persist/etc/nixos/configuration.nix
+
+services.xserver.enable = true;
+services.xserver.displayManager.gdm.enable = true;
+services.xserver.desktopManager.gnome.enable = true;
